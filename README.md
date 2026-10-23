@@ -7,9 +7,6 @@ a small chemistry visualization suite, alongside the
 [Electron Orbital Viewer](https://github.com/jfblanchard/electron-orbital-viewer)
 and [Crystal Viewer](https://github.com/jfblanchard/crystal-viewer).
 
-Looking for the hybrid orbitals? They moved to the
-[Electron Orbital Viewer](https://orbital-viewer.pages.dev) — each molecule's
-info card links straight to its orbital view.
 
 ## Try it live
 
