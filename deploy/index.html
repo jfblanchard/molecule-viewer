@@ -147,6 +147,29 @@
     .chip.on { color: var(--text); border-color: var(--accent); }
     .chip .swatch { width: 9px; height: 9px; margin-right: 5px; vertical-align: 0; }
     .chip:not(.on) .swatch { opacity: 0.35; }
+    .orb-link { display: inline-block; margin-top: 9px; font-size: 12.5px; color: var(--accent); text-decoration: none; }
+    .orb-link:hover { text-decoration: underline; }
+
+    /* vibration: toggle + mode picker in the info card */
+    #vib { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); font-size: 13px; }
+    #vib[hidden] { display: none; }
+    #vib .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    #vib label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    #vib input { accent-color: var(--accent); }
+    #mode {
+      font: inherit;
+      font-size: 12.5px;
+      flex: 1;
+      min-width: 0;
+      max-width: 100%;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 3px 4px;
+    }
+    #mode-info { margin-top: 6px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+    #mode-info .nu { color: var(--text); font-variant-numeric: tabular-nums; }
 
     #hud-bottom {
       position: absolute;
@@ -262,7 +285,7 @@
 <body>
   <aside id="sidebar">
     <h1>Molecule Viewer</h1>
-    <p class="tagline">Hybrid orbitals on real molecular geometry</p>
+    <p class="tagline">Structures &amp; vibration modes</p>
     <nav id="list"></nav>
   </aside>
 
@@ -274,12 +297,19 @@
       <div class="desc" id="desc"></div>
       <div class="facts" id="facts"></div>
       <div id="chips"></div>
+      <a id="orbitals-link" class="orb-link" href="https://orbital-viewer.pages.dev" target="_blank" rel="noopener">See its orbitals &rarr;</a>
+      <div id="vib" hidden>
+        <div class="row">
+          <label title="Animate the selected normal mode (← → step through modes)"><input type="checkbox" id="vibrate" /> Vibrate</label>
+          <select id="mode" aria-label="Normal mode"></select>
+        </div>
+        <div id="mode-info"></div>
+      </div>
     </div>
 
     <div id="hud-bottom">
     <div id="legend" class="card">
       <div id="legend-colors"></div>
-      <div>Each surface encloses <span id="pct">90%</span> of its electron</div>
     </div>
 
     <a id="sourcelink" class="card" href="https://github.com/jfblanchard/molecule-viewer" target="_blank" rel="noopener">
@@ -288,20 +318,11 @@
     </a>
 
     <div id="controls" class="card">
-      <label>Opacity <input type="range" id="opacity" min="0.1" max="1" step="0.01" value="0.4" /></label>
-      <label>Surface holds
-        <select id="fraction">
-          <option value="0.5" selected>50%</option>
-          <option value="0.75">75%</option>
-          <option value="0.9">90%</option>
-          <option value="0.95">95%</option>
-        </select>
-        of the electron
-      </label>
-      <label><input type="checkbox" id="orbitals" checked /> Orbitals</label>
+      <label>Atom size <input type="range" id="atomsize" min="0.3" max="2.5" step="0.05" value="1" /></label>
+      <label>Vibration speed <input type="range" id="speed" min="0.25" max="2" step="0.05" value="1" /></label>
       <label><input type="checkbox" id="spin" checked /> Auto-rotate</label>
       <label><input type="checkbox" id="axes" /> Axes</label>
-      <div class="hint">Drag to rotate · scroll to zoom · right-drag to pan</div>
+      <div class="hint">Drag to rotate · scroll to zoom · right-drag to pan · ← → modes</div>
     </div>
     </div>
 

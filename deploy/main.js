@@ -1,32 +1,23 @@
 /**
  * main.js — Three.js scene and UI for the molecule viewer.
  *
- * molecules.js holds the geometry and a flat list of orbitals (σ hybrids,
- * π p orbitals, lone pairs, hydrogen 1s), each with a center and an axis.
- * Every lobe is symmetric about its axis, so worker.js meshes each distinct
- * shape once along +z and this file places rotated copies on the atoms.
+ * Ball-and-stick structures for the six curated molecules plus their
+ * computed normal-mode vibrations. The molecular orbitals moved to the
+ * electron orbital viewer (orbital-viewer.pages.dev); the info card links
+ * straight to each molecule's orbital view.
  *
  * Sections
  *   1. Scene       renderer, camera, lights, axes
  *   2. Framework   atoms as CPK spheres, bonds as sticks
- *   3. Orbitals    translucent materials, worker queue, lobe placement
- *   4. UI          sidebar, info card, chips, controls, selection
+ *   3. UI          sidebar, info card, controls, selection
+ *   4. Vibration   normal-mode picker and per-frame atom motion (vibrations.js)
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { MOLECULES, MOLECULES_BY_ID } from './molecules.js';
-import { A0, ELEMENTS, canonical } from './molecules-lib.js';
-
-const PLUS_COLOR = '#e8453c';
-const MINUS_COLOR = '#3b82f6';
-const ROLES = {
-  sigma: { color: '#38bdf8', label: 'σ hybrid', chip: 'σ' },
-  pi: { color: '#4ade80', label: 'π (unhybridized p)', chip: 'π' },
-  lp: { color: '#f5a524', label: 'Lone pair', chip: 'lone pairs' },
-  h1s: { color: '#e5e7eb', label: 'Hydrogen 1s', chip: 'H 1s' },
-};
-const ROLE_ORDER = ['sigma', 'pi', 'lp', 'h1s'];
+import { ELEMENTS } from './molecules-lib.js';
+import { MODES, AMPLITUDE, displace, animRate } from './vibrations.js';
 
 // ============================================================================
 // 1. SCENE
@@ -132,8 +123,8 @@ function stepFit(now) {
 // 2. FRAMEWORK
 // ============================================================================
 //
-// Ball-and-stick, opaque, drawn before the translucent lobes so the lobes
-// tint whatever sits behind them. Balls are kept small so the orbitals read.
+// Ball-and-stick, opaque. Balls start at CPK radii; the Atom size slider
+// scales them.
 
 const sphereGeo = new THREE.SphereGeometry(1, 32, 20);
 const stickGeo = new THREE.CylinderGeometry(1, 1, 1, 16, 1);
@@ -146,195 +137,52 @@ const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 function buildFramework(mol) {
   const group = new THREE.Group();
-  for (const at of mol.atoms) {
+  const atoms = mol.atoms.map((at) => {
     const m = new THREE.Mesh(sphereGeo, atomMats[at.el]);
-    m.position.set(...at.pos);
     m.scale.setScalar(ELEMENTS[at.el].radius);
+    m.userData.el = at.el;
     group.add(m);
-  }
+    return m;
+  });
   // Multiple bonds are drawn as parallel sticks spread along the π direction,
   // like the bent bonds of a model kit, so CO₂'s two C=O visibly turn 90°.
+  const sticks = [];
   for (const b of mol.bonds) {
-    const p = new THREE.Vector3(...mol.atoms[b.a].pos);
-    const q = new THREE.Vector3(...mol.atoms[b.b].pos);
-    const axis = q.clone().sub(p);
-    const len = axis.length();
-    axis.normalize();
-    const perp = b.perp ? new THREE.Vector3(...b.perp) : new THREE.Vector3(1, 0, 0);
     const offsets = b.order === 1 ? [0] : b.order === 2 ? [-1, 1] : [0, 120, 240];
-    const r = b.order === 1 ? 0.07 : 0.05;
     for (const o of offsets) {
-      const shift = b.order === 3
-        ? perp.clone().applyAxisAngle(axis, THREE.MathUtils.degToRad(o)).multiplyScalar(0.085)
-        : perp.clone().multiplyScalar(0.075 * o);
-      const s = new THREE.Mesh(stickGeo, stickMat);
-      s.position.copy(p).add(q).multiplyScalar(0.5).add(shift);
-      s.quaternion.setFromUnitVectors(Y_AXIS, axis);
-      s.scale.set(r, len, r);
-      group.add(s);
+      const mesh = new THREE.Mesh(stickGeo, stickMat);
+      group.add(mesh);
+      sticks.push({ mesh, bond: b, o });
     }
   }
+  group.userData = { atoms, sticks, eq: mol.atoms.map((a) => a.pos) };
+  poseFramework(group, group.userData.eq);
   return group;
 }
 
-// ============================================================================
-// 3. ORBITALS
-// ============================================================================
-//
-// Same "textbook" material as the orbital viewer: translucent shells that
-// thicken toward the silhouette, back faces then front faces, no depth
-// writes so overlapping lobes blend.
-
-const opacity = { value: 0.4 };
-const materials = [];
-
-function makeMaterial(color, side) {
-  const mat = new THREE.MeshPhysicalMaterial({
-    color,
-    side,
-    transparent: true,
-    opacity: opacity.value,
-    depthWrite: false,
-    roughness: 0.35,
-    metalness: 0,
-    clearcoat: 0.4,
-    clearcoatRoughness: 0.3,
-  });
-  mat.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <normal_fragment_maps>',
-      `#include <normal_fragment_maps>
-      float rimF = 1.0 - abs(dot(normalize(vViewPosition), normal));
-      diffuseColor.a = clamp(diffuseColor.a * (0.5 + 1.4 * rimF * rimF), 0.0, 1.0);`,
-    );
-  };
-  materials.push(mat);
-  return mat;
-}
-
-const matCache = new Map();
-function materialPair(color) {
-  if (!matCache.has(color)) {
-    matCache.set(color, { back: makeMaterial(color, THREE.BackSide), front: makeMaterial(color, THREE.FrontSide) });
+// Place atoms at positions P (Å) and run each stick between its two atoms.
+// Called once at build and every frame while the molecule vibrates.
+const _p = new THREE.Vector3(), _q = new THREE.Vector3(), _axis = new THREE.Vector3(), _perp = new THREE.Vector3();
+function poseFramework(group, P) {
+  const { atoms, sticks } = group.userData;
+  atoms.forEach((m, i) => m.position.set(...P[i]));
+  for (const { mesh, bond: b, o } of sticks) {
+    _p.set(...P[b.a]);
+    _q.set(...P[b.b]);
+    _axis.subVectors(_q, _p);
+    const len = _axis.length();
+    _axis.normalize();
+    // keep the π direction square to the (possibly bent) bond
+    if (b.perp) _perp.set(...b.perp); else _perp.set(1, 0, 0);
+    _perp.addScaledVector(_axis, -_perp.dot(_axis)).normalize();
+    const r = b.order === 1 ? 0.07 : 0.05;
+    if (b.order === 1) _perp.set(0, 0, 0);
+    else if (b.order === 3) _perp.applyAxisAngle(_axis, THREE.MathUtils.degToRad(o)).multiplyScalar(0.085);
+    else _perp.multiplyScalar(0.075 * o);
+    mesh.position.copy(_p).add(_q).multiplyScalar(0.5).add(_perp);
+    mesh.quaternion.setFromUnitVectors(Y_AXIS, _axis);
+    mesh.scale.set(r, len, r);
   }
-  return matCache.get(color);
-}
-const darker = (hex) => `#${new THREE.Color(hex).multiplyScalar(0.3).getHexString()}`;
-
-function setOpacity(v) {
-  opacity.value = v;
-  materials.forEach((m) => { m.opacity = v; });
-}
-
-// Color by role (σ / π / lone pair / H 1s, with ψ < 0 a darker shade), or
-// by sign alone (red +, blue −) like the orbital viewer.
-function paint(group, bySign) {
-  group.traverse((m) => {
-    if (!m.isMesh) return;
-    const { sign, role, side } = m.userData;
-    const hue = ROLES[role].color;
-    const color = bySign ? (sign > 0 ? PLUS_COLOR : MINUS_COLOR) : (sign > 0 ? hue : darker(hue));
-    m.material = materialPair(color)[side];
-  });
-}
-
-// --- worker queue ------------------------------------------------------------
-//
-// Keys are "<canonical key>@<fraction>". Each resolves to a list of
-// { sign, geometry } in a0, shared by every lobe of that shape.
-
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-const shapes = new Map();  // key → [{ sign, geometry }]
-const specs = new Map();   // key → worker request
-const waiting = new Map(); // key → [resolve]
-const queue = [];
-let busy = null;
-
-worker.onmessage = (e) => {
-  const res = e.data;
-  const parts = res.surfaces.map((s) => {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(s.positions, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(s.normals, 3));
-    geo.setIndex(new THREE.BufferAttribute(s.indices, 1));
-    geo.computeBoundingSphere();
-    return { sign: s.sign, geometry: geo };
-  });
-  shapes.set(res.key, parts);
-  (waiting.get(res.key) || []).forEach((resolve) => resolve(parts));
-  waiting.delete(res.key);
-  busy = null;
-  pump();
-};
-
-function pump() {
-  if (busy) return;
-  while (queue.length && shapes.has(queue[0])) queue.shift();
-  if (!queue.length) return;
-  busy = queue.shift();
-  worker.postMessage(specs.get(busy));
-}
-
-function shapeKey(o, fraction) {
-  const c = canonical(o);
-  const k = `${c.key}@${fraction}`;
-  // spheres need fewer cells than directional lobes
-  if (!specs.has(k)) specs.set(k, { key: k, Z: c.Z, terms: c.terms, fraction, N: c.n === 1 ? 64 : 80 });
-  return k;
-}
-
-function request(k, urgent) {
-  if (shapes.has(k)) return Promise.resolve(shapes.get(k));
-  const p = new Promise((resolve) => {
-    if (!waiting.has(k)) waiting.set(k, []);
-    waiting.get(k).push(resolve);
-  });
-  const i = queue.indexOf(k);
-  if (i >= 0) queue.splice(i, 1);
-  if (busy !== k) urgent ? queue.unshift(k) : queue.push(k);
-  pump();
-  return p;
-}
-
-function prefetchAll(fraction) {
-  for (const mol of MOLECULES) {
-    for (const o of mol.orbitals) {
-      const k = shapeKey(o, fraction);
-      if (!shapes.has(k) && !queue.includes(k) && busy !== k) queue.push(k);
-    }
-  }
-  pump();
-}
-
-/** All lobes of a molecule, each a rotated, scaled copy of its canonical shape. */
-async function buildOrbitals(mol, fraction) {
-  const keys = mol.orbitals.map((o) => shapeKey(o, fraction));
-  // urgent requests jump the queue; reverse so the first ends up in front
-  const unique = [...new Set(keys)];
-  const loaded = new Map();
-  await Promise.all(unique.reverse().map(async (k) => loaded.set(k, await request(k, true))));
-
-  const group = new THREE.Group();
-  mol.orbitals.forEach((o, idx) => {
-    const lobe = new THREE.Group();
-    lobe.position.set(...o.center);
-    if (o.dir) lobe.quaternion.setFromUnitVectors(Z_AXIS, new THREE.Vector3(...o.dir));
-    lobe.scale.setScalar(A0);
-    lobe.userData = { role: o.role };
-    for (const { sign, geometry } of loaded.get(keys[idx])) {
-      const back = new THREE.Mesh(geometry);
-      const front = new THREE.Mesh(geometry);
-      back.renderOrder = 1;
-      front.renderOrder = 2;
-      // the small ψ < 0 lobe behind each hybrid (π lobes are equal pairs, not "small")
-      const small = sign < 0 && o.role !== 'pi';
-      back.userData = { sign, role: o.role, side: 'back', small };
-      front.userData = { sign, role: o.role, side: 'front', small };
-      lobe.add(back, front);
-    }
-    group.add(lobe);
-  });
-  return group;
 }
 
 // ============================================================================
@@ -381,143 +229,50 @@ function renderInfo(mol) {
   ].join('<br>');
 }
 
-// Role chips toggle each kind of orbital. Visibility persists across molecules.
-// The small back lobes of the hybrids start hidden, as in textbook figures;
-// with them on, the overlapping 90% surfaces are hard to read.
-// NOTE: back lobes default ON for a more book-faithful teardrop silhouette.
-const visibleRoles = { sigma: true, pi: true, lp: true, h1s: false };
-let showSmall = true;
-let colorBySign = false;
-
-function applyVisibility() {
-  if (!shownOrbitals) return;
-  shownOrbitals.children.forEach((lobe) => {
-    lobe.visible = visibleRoles[lobe.userData.role];
-    lobe.children.forEach((m) => { m.visible = showSmall || !m.userData.small; });
-  });
-  $('chips').querySelectorAll('[data-role]').forEach((c) => c.classList.toggle('on', visibleRoles[c.dataset.role]));
-}
-
-function renderChips(mol) {
-  const chips = $('chips');
-  chips.innerHTML = '';
-  const present = new Set(mol.orbitals.map((o) => o.role));
-  for (const role of ROLE_ORDER) {
-    if (!present.has(role)) continue;
-    const c = document.createElement('button');
-    c.className = 'chip';
-    c.dataset.role = role;
-    c.innerHTML = `<span class="swatch" style="background:${ROLES[role].color}"></span>${ROLES[role].chip}`;
-    c.title = `Show or hide ${ROLES[role].label.toLowerCase()} orbitals`;
-    c.addEventListener('click', () => {
-      visibleRoles[role] = !visibleRoles[role];
-      applyVisibility();
-    });
-    chips.append(c);
-  }
-  const small = document.createElement('button');
-  small.className = `chip${showSmall ? ' on' : ''}`;
-  small.textContent = 'back lobes';
-  small.title = 'Show the small opposite-sign lobe behind each hybrid';
-  small.addEventListener('click', () => {
-    showSmall = !showSmall;
-    small.classList.toggle('on', showSmall);
-    applyVisibility();
-  });
-  chips.append(small);
-
-  const sign = document.createElement('button');
-  sign.className = `chip${colorBySign ? ' on' : ''}`;
-  sign.textContent = 'color by sign';
-  sign.title = 'Color lobes red (ψ > 0) and blue (ψ < 0) instead of by role';
-  sign.addEventListener('click', () => {
-    colorBySign = !colorBySign;
-    sign.classList.toggle('on', colorBySign);
-    if (shownOrbitals) paint(shownOrbitals, colorBySign);
-    renderLegend();
-  });
-  chips.append(sign);
-}
-
+// Legend: CPK colors for the elements in view.
 function renderLegend() {
   const mol = MOLECULES_BY_ID[current];
-  const present = ROLE_ORDER.filter((r) => mol && mol.orbitals.some((o) => o.role === r));
-  $('legend-colors').innerHTML = colorBySign
-    ? '<div><span class="swatch" style="background: var(--plus)"></span>ψ &gt; 0</div>'
-      + '<div><span class="swatch" style="background: var(--minus)"></span>ψ &lt; 0</div>'
-    : present.map((r) => `<div><span class="swatch" style="background:${ROLES[r].color}"></span>${ROLES[r].label}</div>`).join('')
-      + '<div><span class="swatch" style="background:#333"></span>Darker shade: ψ &lt; 0</div>';
+  const els = [...new Set((mol ? mol.atoms : []).map((a) => a.el))];
+  $('legend-colors').innerHTML = els
+    .map((e) => `<div><span class="swatch" style="background:#${new THREE.Color(ELEMENTS[e].color).getHexString()}"></span>${e}</div>`)
+    .join('');
 }
 
 let current = null;
 let shownFramework = null;
-let shownOrbitals = null;
 let firstLoad = true;
-let keepView = false; // set when only the contour level changes
 
-async function select(id) {
+function select(id) {
   const mol = MOLECULES_BY_ID[id] || MOLECULES[0];
   const changed = current !== mol.id;
   current = mol.id;
   buttons.forEach((b, k) => b.classList.toggle('active', k === mol.id));
   if (location.hash.slice(1) !== mol.id) history.replaceState(null, '', `#${mol.id}`);
   renderInfo(mol);
-  renderChips(mol);
   renderLegend();
+  $('orbitals-link').href = `https://orbital-viewer.pages.dev/#${mol.id}`;
 
-  // The framework appears at once; the orbitals follow when meshed.
   if (changed || !shownFramework) {
+    stopVibration();
+    renderModes(mol);
     if (shownFramework) scene.remove(shownFramework);
     shownFramework = buildFramework(mol);
     scene.add(shownFramework);
-    if (shownOrbitals) { scene.remove(shownOrbitals); shownOrbitals = null; }
   }
 
-  const loading = setTimeout(() => $('loading').classList.add('show'), 120);
-  const fraction = +$('fraction').value;
-  const group = await buildOrbitals(mol, fraction);
-  clearTimeout(loading);
-  if (current !== mol.id || fraction !== +$('fraction').value) return; // user moved on
-  $('loading').classList.remove('show');
-
-  if (shownOrbitals) scene.remove(shownOrbitals);
-  shownOrbitals = group;
-  group.visible = $('orbitals').checked;
-  paint(group, colorBySign);
-  scene.add(group);
-  applyVisibility();
-  $('pct').textContent = `${Math.round(fraction * 100)}%`;
-  document.body.dataset.shown = `${mol.id}@${fraction}`; // lets scripted checks wait for the mesh
-
-  if (!keepView) frame(mol, !firstLoad);
-  keepView = false;
-  if (firstLoad) {
-    firstLoad = false;
-    prefetchAll(fraction);
-  }
+  document.body.dataset.shown = mol.id; // lets scripted checks wait for the build
+  frame(mol, !firstLoad);
+  firstLoad = false;
 }
 
-// Fit the camera to the molecule plus its σ lobes, so the view doesn't
-// change size when orbitals are toggled.
+// Fit the camera to the molecule's atoms, with a little margin.
 function frame(mol, animate = true) {
-  let R = Math.max(...mol.atoms.map((a) => Math.hypot(...a.pos) + ELEMENTS[a.el].radius));
-  const v = new THREE.Vector3();
-  shownOrbitals.updateMatrixWorld(true);
-  shownOrbitals.children.forEach((lobe) => {
-    if (lobe.userData.role === 'h1s') return;
-    lobe.children.forEach((m) => {
-      const pos = m.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i += 7) {
-        R = Math.max(R, v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld).length());
-      }
-    });
-  });
+  const R = Math.max(...mol.atoms.map((a) => Math.hypot(...a.pos) + ELEMENTS[a.el].radius)) * 1.15;
   setAxisLength(R);
   fitCamera(R, animate, mol.view || VIEW_DIR.toArray());
 }
 
 // Controls
-$('opacity').addEventListener('input', (e) => setOpacity(+e.target.value));
 $('spin').addEventListener('change', (e) => { controls.autoRotate = e.target.checked; });
 // CSS2D labels ignore their parent's visibility, so hide them explicitly
 function showAxes(on) {
@@ -526,17 +281,24 @@ function showAxes(on) {
 }
 showAxes(false);
 $('axes').addEventListener('change', (e) => showAxes(e.target.checked));
-$('orbitals').addEventListener('change', (e) => { if (shownOrbitals) shownOrbitals.visible = e.target.checked; });
-$('fraction').addEventListener('change', () => {
-  keepView = true;
-  select(current);
+$('atomsize').addEventListener('input', (e) => {
+  const k = +e.target.value;
+  if (shownFramework) {
+    shownFramework.userData.atoms.forEach((m) => m.scale.setScalar(ELEMENTS[m.userData.el].radius * k));
+  }
 });
 $('menu').addEventListener('click', () => document.body.classList.toggle('menu-open'));
 renderer.domElement.addEventListener('pointerdown', () => document.body.classList.remove('menu-open'));
 
-// Arrow keys step through the list.
+// Arrow keys step through the list; left/right step through the modes.
 window.addEventListener('keydown', (e) => {
-  if (['INPUT', 'SELECT'].includes(e.target.tagName) || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+  if (['INPUT', 'SELECT'].includes(e.target.tagName)) return;
+  if (['ArrowLeft', 'ArrowRight'].includes(e.key)) {
+    e.preventDefault();
+    stepMode(e.key === 'ArrowRight' ? 1 : -1);
+    return;
+  }
+  if (!['ArrowUp', 'ArrowDown'].includes(e.key)) return;
   e.preventDefault();
   const i = MOLECULES.findIndex((m) => m.id === current);
   const next = MOLECULES[(i + (e.key === 'ArrowDown' ? 1 : -1) + MOLECULES.length) % MOLECULES.length];
@@ -549,9 +311,98 @@ window.addEventListener('hashchange', () => {
 
 renderer.setAnimationLoop((now) => {
   stepFit(now);
+  stepVibration(now);
   controls.update();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
 });
+
+// ============================================================================
+// 5. VIBRATION
+// ============================================================================
+//
+// Every atom follows eq + A·disp·sin(φ), all at the mode's one frequency.
+// φ advances by 2π·f·speed·dt, so the speed slider never makes the atoms jump.
+
+const vib = { on: false, mode: 0, phase: 0, last: 0, positions: null };
+
+function currentModes() {
+  return MODES[current] || [];
+}
+
+// ν10 → ν₁₀
+const sub = (t) => t.replace(/\d/g, (d) => '₀₁₂₃₄₅₆₇₈₉'[d]);
+const modeName = (m) => `${sub(m.n)} ${m.label}${m.part ? ` (${m.part})` : ''}`;
+
+function renderModes(mol) {
+  const modes = MODES[mol.id] || [];
+  $('vib').hidden = !modes.length;
+  $('mode').innerHTML = modes
+    .map((m, i) => `<option value="${i}">${modeName(m)} · ${m.nu} cm⁻¹</option>`)
+    .join('');
+  vib.mode = 0;
+  renderMode();
+}
+
+function renderMode() {
+  const m = currentModes()[vib.mode];
+  if (!m) return;
+  $('mode').value = String(vib.mode);
+  $('mode-info').innerHTML = `<span class="nu">${m.nu} cm⁻¹</span> · ${m.sym} · ${m.desc}`;
+}
+
+function setPositions(P) {
+  vib.positions = P;
+  if (shownFramework) poseFramework(shownFramework, P);
+}
+
+/** Back to equilibrium, motion off. */
+function stopVibration() {
+  vib.on = false;
+  vib.phase = 0;
+  $('vibrate').checked = false;
+  // the framework on screen may belong to the molecule we are leaving
+  if (vib.positions && shownFramework) setPositions(shownFramework.userData.eq);
+  vib.positions = null;
+}
+
+function startVibration() {
+  if (!currentModes().length) return;
+  vib.on = true;
+  vib.phase = 0;
+  vib.last = performance.now();
+  $('vibrate').checked = true;
+}
+
+function setMode(i) {
+  vib.mode = i;
+  vib.phase = 0; // restart from equilibrium so the new mode starts cleanly
+  renderMode();
+}
+
+function stepMode(dir) {
+  const n = currentModes().length;
+  if (!n) return;
+  setMode((vib.mode + dir + n) % n);
+  if (!vib.on) startVibration();
+}
+
+function stepVibration(now) {
+  if (!vib.on) return;
+  const m = currentModes()[vib.mode];
+  const dt = Math.min(0.1, (now - vib.last) / 1000); // no leap after a hidden tab
+  vib.last = now;
+  vib.phase = (vib.phase + 2 * Math.PI * animRate(m.nu) * +$('speed').value * dt) % (2 * Math.PI);
+  setPositions(displace(MOLECULES_BY_ID[current].atoms, m.disp, AMPLITUDE * Math.sin(vib.phase)));
+}
+
+$('vibrate').addEventListener('change', (e) => (e.target.checked ? startVibration() : stopVibration()));
+$('mode').addEventListener('change', (e) => {
+  setMode(+e.target.value);
+  if (!vib.on) startVibration();
+});
+
+// Scripted checks (?shot) read the live atom positions.
+if (location.search.includes('shot')) window.__vib = () => ({ ...vib, positions: vib.positions });
 
 select(location.hash.slice(1) || 'c2h4');

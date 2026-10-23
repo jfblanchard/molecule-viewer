@@ -1,11 +1,15 @@
 # Molecule Viewer
 
-An interactive 3D viewer that overlays **hybrid orbitals on real molecular
-geometry**. Translucent sp³, sp², and sp lobes sit on an accurate ball-and-stick
-framework, so you can see why methane is tetrahedral, water is bent, and carbon
-dioxide is linear. Part of a small chemistry visualization suite, alongside the
+An interactive 3D viewer of **molecular structures and vibration modes**.
+Ball-and-stick molecules at experimental geometry, with computed normal-mode
+animations — watch water bend, methane stretch, and acetylene scissor. Part of
+a small chemistry visualization suite, alongside the
 [Electron Orbital Viewer](https://github.com/jfblanchard/electron-orbital-viewer)
 and [Crystal Viewer](https://github.com/jfblanchard/crystal-viewer).
+
+Looking for the hybrid orbitals? They moved to the
+[Electron Orbital Viewer](https://orbital-viewer.pages.dev) — each molecule's
+info card links straight to its orbital view.
 
 ## Try it live
 
@@ -30,19 +34,17 @@ and [Crystal Viewer](https://github.com/jfblanchard/crystal-viewer).
 | C₂H₂ | C sp | Linear | H–C–C 180° |
 | CO₂ | C sp, O sp² | Linear | O–C–O 180° |
 
-- **σ hybrids, lone pairs, and π bonds**, each toggleable, plus hydrogen 1s and
-  back lobes.
-- **Surface level**: each lobe encloses 50%, 75%, 90%, or 95% of its electron.
-- **Color by sign** of the wavefunction, opacity, axes, and auto-rotate.
+- **Normal-mode vibrations** — pick a mode, animate it, step through with ← →.
+- **Adjustable atom size**, axes, and auto-rotate.
 - **Deep links**: `#ch4`, `#nh3`, `#h2o`, `#c2h4`, `#c2h2`, `#co2`.
+- **Cross-links**: "See its orbitals →" jumps to the same molecule in the
+  Electron Orbital Viewer.
 
-## The physics
+## The model
 
-Orbitals are real hydrogen-like wavefunctions (associated Laguerre radial parts,
-real signed spherical harmonics) with Slater effective charges, meshed as
-isosurfaces off the main thread. Hybrid s-character comes from the actual bond
-angles via Coulson's theorem, so water's O–H hybrids are 20% s and its lone
-pairs 30% s rather than a flat 25%. Bond lengths and angles are experimental.
+Bond lengths and angles are experimental. Normal modes are computed harmonic
+oscillators with their real frequencies and symmetry labels; atoms follow
+eq + A·sin(ωt) so a mode's animation is a single shared oscillation.
 
 ## Run locally
 
@@ -61,14 +63,10 @@ npx wrangler pages deploy . --project-name <your-project-name>
 
 ## Tests
 
-```bash
-cd deploy
-node --test test_molecules.mjs
-```
-
-Checks bond lengths and angles against experiment, orthonormality of every
-hybrid set, that each σ hybrid peaks along its bond, lone-pair placement, and
-the orientation of every π system.
+The geometry and orbital-math test suite lives with the orbital engine in
+[`electron-orbital-viewer`](https://github.com/jfblanchard/electron-orbital-viewer):
+`node --test tests/` there checks bond lengths and angles against experiment,
+hybrid orthonormality, and π-system orientation.
 
 ## Layout
 
