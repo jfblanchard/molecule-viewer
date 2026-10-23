@@ -2,7 +2,7 @@
 
 An interactive 3D viewer of **molecular structures and vibration modes**.
 Ball-and-stick molecules at experimental geometry, with computed normal-mode
-animations — watch water bend, methane stretch, and acetylene scissor. Part of
+animations such as molecular bending, stretching, and scissoring. Part of
 a small chemistry visualization suite, alongside the
 [Electron Orbital Viewer](https://github.com/jfblanchard/electron-orbital-viewer)
 and [Crystal Viewer](https://github.com/jfblanchard/crystal-viewer).
